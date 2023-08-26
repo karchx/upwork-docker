@@ -1,0 +1,150 @@
+version: "3.7"
+
+services:
+  reverse-proxy:
+    # The official v2 Traefik docker image
+    image: traefik:v2.10
+    # Enables the web UI and tells Traefik to listen to docker
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.api.address=:3000"
+      - "--entrypoints.pgadmin.address=:5050"
+      - "--entrypoints.realtime.address=:5001"
+    ports:
+      # The HTTP port
+      - "80:80"
+      # The Web UI (enabled by --api.insecure=true)
+      - "8080:8080"
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  redis:
+    image: redis:7.0
+    env_file:
+      .env
+    volumes:
+      - redis:/var/lib/redis/data
+    networks:
+      - app-network
+    ports:
+      - '6379:6379'
+
+  redis-sidekiq:
+    image: redis:7.0
+    env_file:
+      .env
+    volumes:
+      - redis-sidekiq:/var/lib/redis/data-sidekiq
+    networks:
+      - app-network
+
+# https://registry.hub.docker.com/r/postgis/postgis/
+  db:
+    image: postgis/postgis:13-3.1-alpine
+    env_file:
+      .env
+    volumes:
+      - postgis:/var/lib/postgresql/data
+    networks:
+      - app-network
+    ports:
+      - '5432:5432'
+
+# https://crivetimihai.github.io/geospacial-engineering/setup/
+  pgadmin4:
+    image: dpage/pgadmin4
+    container_name: pgadmin4
+    ports:
+        - '5050:80'
+    environment:
+        PGADMIN_DEFAULT_EMAIL: admin@headcount.com
+        PGADMIN_DEFAULT_PASSWORD: admin
+    links:
+        - db
+    networks:
+      - app-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin4.entrypoints=pgadmin"
+
+  api:
+    build:
+      context: .
+      target: app
+    command: bash -c " rm -f tmp/pids/server.pid &&  bundle exec rails s -p 3000 -b '0.0.0.0'"
+    volumes:
+      - .:/usr/src/app
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+      - redis
+      - redis-sidekiq
+    env_file:
+      .env
+    networks:
+      # - proxy
+      - app-network
+    labels:
+      - "traefik.enable=true"
+      # - "traefik.http.routers.api.rule=Path(`/be{path:.*}`)"
+      - "traefik.http.routers.api.entrypoints=api"
+
+
+  realtime:
+    image: "node:19.6-alpine"
+    user: "node"
+    working_dir: /home/node/app
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./rt-server:/home/node/app
+    expose:
+      - "5001"
+    ports:
+      - "5001:5001"
+    command: "npm start"
+    networks:
+      # - proxy
+      - app-network
+    labels:
+      - "traefik.enable=true"
+      # - "traefik.http.routers.realtime.rule=Path(`/rt{path:.*}`)"
+      - "traefik.http.routers.realtime.entrypoints=realtime"
+  # app:
+  #   build:
+  #     context: headcount-app
+  #     target: builder
+  #   ports:
+  #     - 4200:4200
+  #   volumes:
+  #     - ./headcount-app:/project
+  #     - /project/node_modules
+
+  sidekiq:
+    build:
+      context: .
+    command: bundle exec sidekiq
+    links:
+      - db
+      - redis-sidekiq
+      - redis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+  # proxy:
+  #   external:
+  #     name: nginx-proxy
+
+volumes:
+  redis:
+  postgis:
+  redis-sidekiq:
